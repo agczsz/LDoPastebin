@@ -1,0 +1,11 @@
+version: '3'
+
+services:
+  web:
+    build: .
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env
+    restart: unless-stopped 

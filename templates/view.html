@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block content %}
+    <h2>{{ paste.title or '无标题' }}</h2>
+    <div class="card mb-3">
+        <div class="card-header">
+            作者: {{ paste.creator_username }} | 创建时间: {{ paste.created_at }}
+            {% if paste.creator_id == session.user_info.id %}
+            <a href="{{ url_for('edit_paste', paste_id=paste.id) }}" class="btn btn-sm btn-primary float-end">编辑</a>
+            {% endif %}
+        </div>
+        {% if paste.description %}
+        <div class="card-body bg-light">
+            <p class="card-text">{{ paste.description }}</p>
+        </div>
+        {% endif %}
+        <div class="card-body">
+            {% if paste.is_card_distribution %}
+                {% if user_card %}
+                    <div class="alert alert-success">
+                        您的卡密内容：
+                        <pre>{{ user_card }}</pre>
+                    </div>
+                {% else %}
+                    <div class="alert alert-warning">
+                        暂无可用卡密或已全部分发完毕
+                    </div>
+                {% endif %}
+            {% else %}
+                <pre>{{ paste.content }}</pre>
+            {% endif %}
+        </div>
+        <div class="card-footer">
+            <small class="text-muted">
+                分享链接: <input type="text" class="form-control-sm" readonly value="{{ request.url }}" onclick="this.select()">
+            </small>
+        </div>
+    </div>
+{% endblock %} 
