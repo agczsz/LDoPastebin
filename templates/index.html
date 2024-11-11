@@ -1,12 +1,13 @@
 {% extends "base.html" %}
 
 {% block content %}
-    {% if 'user_info' in session %}
+    {% if user or is_anonymous %}
         <h2>可访问的 Pastes</h2>
         {% if pastes %}
             <div class="list-group">
                 {% for paste in pastes %}
-                    <a href="{{ url_for('view_paste', paste_id=paste.id) }}" class="list-group-item list-group-item-action">
+                    <a href="{{ url_for('view_paste', paste_id=paste.id, anonymous=1 if is_anonymous else None) }}" 
+                       class="list-group-item list-group-item-action">
                         <div class="d-flex w-100 justify-content-between">
                             <h5 class="mb-1">{{ paste.title or '无标题' }}</h5>
                             <small>{{ paste.created_at.strftime('%Y-%m-%d %H:%M') }}</small>
@@ -24,8 +25,11 @@
     {% else %}
         <div class="text-center">
             <h2>欢迎使用 Pastebin</h2>
-            <p>请登录后使用完整功能</p>
-            <a href="/oauth2/initiate" class="btn btn-primary">登录</a>
+            <p>请选择访问方式</p>
+            <div class="btn-group">
+                <a href="/oauth2/initiate" class="btn btn-primary">登录</a>
+                <a href="/?anonymous=1" class="btn btn-secondary">匿名访问</a>
+            </div>
         </div>
     {% endif %}
 {% endblock %} 

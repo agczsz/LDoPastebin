@@ -2,10 +2,11 @@ from flask import Flask, session, redirect, request, jsonify, render_template, f
 import os
 from dotenv import load_dotenv
 import requests
-from models import db, Paste, CardDistribution
+from models import db, Paste, CardDistribution, User, Comment
 from functools import wraps
 import random
-from sqlalchemy import and_
+from sqlalchemy import and_, func
+from datetime import datetime
 
 # 加载环境变量
 load_dotenv()
@@ -34,40 +35,61 @@ USER_ENDPOINT = os.getenv('USER_ENDPOINT')
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        if 'user_info' not in session and not request.args.get('anonymous'):
+            return redirect('/oauth2/initiate')
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
         if 'user_info' not in session:
             return redirect('/oauth2/initiate')
+        user = User.query.get(session['user_info']['id'])
+        if not user or not user.is_admin:
+            return "需要管理员权限", 403
         return f(*args, **kwargs)
     return decorated_function
 
 @app.route('/')
 def index():
     if 'user_info' in session:
-        # 只显示公开的和用户自己创建的 pastes
+        # 登录用户可以看到公开的和自己的 pastes
         public_pastes = Paste.query.filter_by(is_public=True).all()
         own_pastes = Paste.query.filter_by(creator_id=session['user_info']['id'], is_public=False).all()
-        
-        # 合并并过滤有权限查看的 pastes
         all_pastes = public_pastes + own_pastes
         allowed_pastes = [paste for paste in all_pastes if can_view_paste(paste, session['user_info'])]
-        
-        return render_template('index.html', pastes=allowed_pastes, user=session['user_info'])
-    return render_template('index.html')
-
-def can_view_paste(paste, user_info):
-    # 检查用户是否有权限查看该 paste
-    if paste.creator_id == user_info['id']:
-        return True
+    else:
+        # 匿名用户只能看到公开的 pastes
+        allowed_pastes = Paste.query.filter_by(is_public=True).all()
     
-    # 检查信任等级
-    if int(user_info['trust_level']) >= paste.min_trust_level:
+    return render_template('index.html', 
+        pastes=allowed_pastes, 
+        user=session.get('user_info'),
+        is_anonymous='anonymous' in request.args
+    )
+
+def can_view_paste(paste, user_info=None):
+    # 如果是匿名访问且 paste 是公开的
+    if user_info is None and paste.is_public:
         return True
         
-    # 检查允许的用户名单
-    if paste.allowed_users:
-        allowed_users = paste.allowed_users.split(',')
-        if user_info['username'] in allowed_users:
+    # 如果是登录用户
+    if user_info:
+        # 创建者可以查看
+        if paste.creator_id == user_info['id']:
+            return True
+        
+        # 检查信任等级
+        if int(user_info['trust_level']) >= paste.min_trust_level:
             return True
             
+        # 检查允许的用户名单
+        if paste.allowed_users:
+            allowed_users = paste.allowed_users.split(',')
+            if user_info['username'] in allowed_users:
+                return True
+                
     return False
 
 @app.route('/create', methods=['GET', 'POST'])
@@ -78,13 +100,15 @@ def create_paste():
             content=request.form.get('content'),
             title=request.form.get('title'),
             description=request.form.get('description'),
+            language=request.form.get('language'),
             creator_id=session['user_info']['id'],
             creator_username=session['user_info']['username'],
             is_public='is_public' in request.form,
             min_trust_level=int(request.form.get('min_trust_level', 0)),
             allowed_users=request.form.get('allowed_users', ''),
             is_card_distribution='is_card_distribution' in request.form,
-            allow_repeat='allow_repeat' in request.form
+            allow_repeat='allow_repeat' in request.form,
+            show_progress='show_progress' in request.form
         )
         
         db.session.add(paste)
@@ -103,10 +127,12 @@ def edit_paste(paste_id):
     if request.method == 'POST':
         paste.content = request.form.get('content')
         paste.title = request.form.get('title')
+        paste.language = request.form.get('language')
         paste.min_trust_level = int(request.form.get('min_trust_level', 0))
         paste.allowed_users = request.form.get('allowed_users', '')
         paste.is_card_distribution = 'is_card_distribution' in request.form
         paste.allow_repeat = 'allow_repeat' in request.form
+        paste.show_progress = 'show_progress' in request.form
         
         db.session.commit()
         return redirect(url_for('view_paste', paste_id=paste_id))
@@ -114,18 +140,36 @@ def edit_paste(paste_id):
     return render_template('edit.html', paste=paste)
 
 @app.route('/view/<int:paste_id>')
-@login_required
 def view_paste(paste_id):
     paste = Paste.query.get_or_404(paste_id)
-    if not can_view_paste(paste, session['user_info']):
+    user_info = session.get('user_info')
+    
+    if not can_view_paste(paste, user_info):
+        if 'user_info' not in session:
+            return redirect(url_for('initiate_auth'))
         return "没有权限查看此 Paste", 403
-        
+    
     user_card = None
-    if paste.is_card_distribution:
-        # 获取用户的卡密
-        user_card = get_user_card(paste, session['user_info']['id'])
-        
-    return render_template('view.html', paste=paste, user_card=user_card)
+    progress = None
+    if paste.is_card_distribution and user_info:  # 只有登录用户才能获取卡密
+        user_card = get_user_card(paste, user_info['id'])
+        if paste.show_progress and not paste.allow_repeat:
+            total_lines = len(paste.content.splitlines())
+            used_lines = CardDistribution.query.filter_by(paste_id=paste.id).count()
+            progress = {
+                'used': used_lines,
+                'total': total_lines,
+                'percent': (used_lines / total_lines * 100) if total_lines > 0 else 0
+            }
+    
+    return render_template('view.html',
+        paste=paste,
+        user_card=user_card,
+        progress=progress,
+        comments=paste.comments,
+        user=user_info,
+        is_anonymous='anonymous' in request.args
+    )
 
 def get_user_card(paste, user_id):
     # 检查用户是否已经分配了卡密
@@ -220,13 +264,88 @@ def callback():
         )
         user_response.raise_for_status()
         
-        session['user_info'] = user_response.json()
+        user_data = user_response.json()
+        session['user_info'] = user_data
+        
+        # 更新或创建用户记录
+        user = User.query.get(user_data['id'])
+        if not user:
+            user = User(
+                id=user_data['id'],
+                username=user_data['username'],
+                trust_level=user_data['trust_level']
+            )
+            db.session.add(user)
+        else:
+            user.username = user_data['username']
+            user.trust_level = user_data['trust_level']
+        
+        user.last_login = datetime.utcnow()
+        db.session.commit()
+        
         return redirect('/')
         
     except requests.exceptions.RequestException as e:
         print(f"OAuth error: {str(e)}")
         flash('登录过程发生错误，请重试', 'error')
         return redirect('/oauth2/initiate')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/')
+
+@app.route('/paste/<int:paste_id>/comment', methods=['POST'])
+@login_required
+def add_comment(paste_id):
+    paste = Paste.query.get_or_404(paste_id)
+    if not can_view_paste(paste, session['user_info']):
+        return "没有权限评论", 403
+        
+    content = request.form.get('content')
+    if not content:
+        return "评论内容不能为空", 400
+        
+    comment = Comment(
+        paste_id=paste_id,
+        user_id=session['user_info']['id'],
+        username=session['user_info']['username'],
+        content=content
+    )
+    db.session.add(comment)
+    db.session.commit()
+    
+    return redirect(url_for('view_paste', paste_id=paste_id))
+
+@app.route('/admin')
+@admin_required
+def admin_dashboard():
+    # 统计数据
+    total_pastes = Paste.query.count()
+    total_users = User.query.count()
+    total_comments = Comment.query.count()
+    total_distributions = CardDistribution.query.count()
+    
+    # 最近的 Pastes
+    recent_pastes = Paste.query.order_by(Paste.created_at.desc()).limit(10).all()
+    
+    # 最活跃用户
+    active_users = db.session.query(
+        User,
+        func.count(Paste.id).label('paste_count')
+    ).outerjoin(Paste, User.id == Paste.creator_id)\
+     .group_by(User.id)\
+     .order_by(func.count(Paste.id).desc())\
+     .limit(10).all()
+    
+    return render_template('admin/dashboard.html',
+        total_pastes=total_pastes,
+        total_users=total_users,
+        total_comments=total_comments,
+        total_distributions=total_distributions,
+        recent_pastes=recent_pastes,
+        active_users=active_users
+    )
 
 if __name__ == '__main__':
     with app.app_context():
